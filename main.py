@@ -10,7 +10,7 @@ from loan_model import (
     run_loan_scenario
 )
 from validation import validate_loan_schedule
-from pool_model import create_sample_loan_tape, run_pool_simulation, vasicek_loss_quantile
+from pool_model import create_sample_loan_tape, run_pool_simulation_vectorized, vasicek_loss_quantile
 import pandas as pd
 import matplotlib.pyplot as plt
 
@@ -177,10 +177,12 @@ loan_tape = create_sample_loan_tape(n_loans=30, seed=0)
 print(loan_tape.head())
 print("Total Pool Balance:", loan_tape["Loan Balance"].sum())
 
-# base case: 200 simulated futures of the pool under the default model parameters
-path_results, loan_results = run_pool_simulation(
+n_paths = 10_000
+
+# base case: n_paths simulated futures of the pool under the default model parameters
+path_results, loan_results = run_pool_simulation_vectorized(
     loan_tape=loan_tape,
-    n_paths=200,
+    n_paths=n_paths,
     refinance_assumptions=refinance_assumptions,
     workout_assumptions=workout_assumptions
 )
@@ -194,16 +196,19 @@ print(loan_results["Outcome"].value_counts())
 
 # correlation sensitivity: same pool, same shocks, every loan's beta forced to one value
 # shows that correlation moves the tail of the loss distribution far more than the mean
+
 beta_rows = []
 for beta in [0.0, 0.3, 0.6, 0.9]:
     beta_tape = loan_tape.copy()
     beta_tape["Beta"] = beta
-    beta_paths, beta_loans = run_pool_simulation(
+    
+    beta_paths, beta_loans = run_pool_simulation_vectorized(
         loan_tape = beta_tape,
-        n_paths = 200,
+        n_paths = n_paths,
         refinance_assumptions = refinance_assumptions,
         workout_assumptions = workout_assumptions
     )
+
     beta_rows.append({
         "Beta": beta,
         "Mean Loss Rate": beta_paths["Loss Rate"].mean(),
@@ -220,14 +225,16 @@ balance_lookup = {}
 for i in range(len(loan_tape)):
     loan = loan_tape.iloc[i]
     balance_lookup[int(loan["Loan ID"])] = loan["Loan Balance"]
- 
+
+is_default = (loan_results["Outcome"] == "Term Default") | (loan_results["Outcome"] == "Maturity Default")
+defaulted_results = loan_results[is_default]
+
 defaulted_balance = 0.0
 defaulted_loss = 0.0
-for i in range(len(loan_results)):
-    row = loan_results.iloc[i]
-    if row["Outcome"] == "Term Default" or row["Outcome"] == "Maturity Default":
-        defaulted_balance += balance_lookup[int(row["Loan ID"])]
-        defaulted_loss += row["Loss"]
+for i in range(len(defaulted_results)):
+    row = defaulted_results.iloc[i]
+    defaulted_balance += balance_lookup[int(row["Loan ID"])]
+    defaulted_loss += row["Loss"]
  
 pool_pd = path_results["Default Rate"].mean()
 pool_lgd = defaulted_loss / defaulted_balance
@@ -243,9 +250,9 @@ print("Simulated 99th pct loss rate:", round(path_results["Loss Rate"].quantile(
 # note 0.15 is the base case
 sigma_rows = []
 for sigma_noi in [0.10, 0.15, 0.20]:
-    sigma_paths, sigma_loans = run_pool_simulation(
+    sigma_paths, sigma_loans = run_pool_simulation_vectorized(
         loan_tape = loan_tape,
-        n_paths = 200,
+        n_paths = n_paths,
         refinance_assumptions = refinance_assumptions,
         workout_assumptions = workout_assumptions,
         sigma_noi = sigma_noi
@@ -264,9 +271,9 @@ print(sigma_table.round(4).to_string(index = False))
 # note 0.01 is the base case
 cap_rows = []
 for cap_sensitivity in [0.0, 0.01, 0.02]:
-    cap_paths, cap_loans = run_pool_simulation(
+    cap_paths, cap_loans = run_pool_simulation_vectorized(
         loan_tape = loan_tape,
-        n_paths = 200,
+        n_paths = n_paths,
         refinance_assumptions = refinance_assumptions,
         workout_assumptions = workout_assumptions,
         cap_sensitivity = cap_sensitivity
@@ -294,7 +301,7 @@ plt.axvline(percentile_95_loss_rate, color = "orange", linestyle = "--", label =
 plt.axvline(percentile_99_loss_rate, color = "red", linestyle = "--", label = "99th percentile = {:.1%}".format(percentile_99_loss_rate))
 plt.xlabel("Pool loss rate")
 plt.ylabel("Number of paths")
-plt.title("Simulated pool loss distribution (30 loans, 200 paths)")
+plt.title("Simulated pool loss distribution (30 loans, {:,} paths)".format(n_paths))
 plt.legend()
 plt.tight_layout()
 plt.savefig("loss_distribution.png", dpi = 150)

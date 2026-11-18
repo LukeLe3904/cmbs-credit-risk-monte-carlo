@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from scipy.stats import norm
-from pool_model import create_sample_loan_tape, draw_shocks, run_pool_simulation, vasicek_loss_quantile
+from pool_model import create_sample_loan_tape, draw_shocks, run_pool_simulation, run_pool_simulation_vectorized, vasicek_loss_quantile
 from loan_model import create_loan_schedule
 
 # tolerances: one cent on dollar amounts, floating-point noise on quantities that are the same calculation,
@@ -209,4 +209,35 @@ high_beta_paths, high_beta_loans = run_pool_simulation(
 )
 assert high_beta_paths["Loss Rate"].quantile(0.99) > low_beta_paths["Loss Rate"].quantile(0.99)
 
-print("All 12 tests passed")
+# vectorized regression test: with the same seed, run_pool_simulation_vectorized must reproduce the loop version
+# loan by loan (same path, loan, outcome and loss) and path by path (same loss rate and default rate).
+# batch_size = 70 splits the 200 paths into batches of 70, 70 and 60, so the test also checks that batching does not change the shocks
+regression_tape = create_sample_loan_tape(n_loans = 30, seed = 0)
+loop_paths, loop_loans = run_pool_simulation(
+    loan_tape = regression_tape,
+    n_paths = 200,
+    refinance_assumptions = refinance_assumptions,
+    workout_assumptions = workout_assumptions,
+    seed = 1
+)
+vectorized_paths, vectorized_loans = run_pool_simulation_vectorized(
+    loan_tape = regression_tape,
+    n_paths = 200,
+    refinance_assumptions = refinance_assumptions,
+    workout_assumptions = workout_assumptions,
+    seed = 1,
+    batch_size = 70
+)
+assert list(vectorized_paths.columns) == list(loop_paths.columns)
+assert list(vectorized_loans.columns) == list(loop_loans.columns)
+assert len(vectorized_loans) == len(loop_loans)
+for row in range(len(loop_loans)):
+    assert vectorized_loans.iloc[row]["Path"] == loop_loans.iloc[row]["Path"]
+    assert vectorized_loans.iloc[row]["Loan ID"] == loop_loans.iloc[row]["Loan ID"]
+    assert vectorized_loans.iloc[row]["Outcome"] == loop_loans.iloc[row]["Outcome"]
+    assert abs(vectorized_loans.iloc[row]["Loss"] - loop_loans.iloc[row]["Loss"]) < money_tolerance
+for row in range(len(loop_paths)):
+    assert abs(vectorized_paths.iloc[row]["Loss Rate"] - loop_paths.iloc[row]["Loss Rate"]) < float_tolerance
+    assert vectorized_paths.iloc[row]["Default Rate"] == loop_paths.iloc[row]["Default Rate"]
+
+print("All 13 tests passed")
